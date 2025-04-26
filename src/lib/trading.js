@@ -1,25 +1,58 @@
 // src/lib/trading.js
 export const initializeParameters = (historicalPrices) => {
-  const timeframes = {
-    daily: 1,
-    weekly: 7,
-    biweekly: 14,
-    monthly: 30,
-    quarterly: 90
-  };
+  const timeframes = { daily: 1, weekly: 7, biweekly: 14, monthly: 30, quarterly: 90 };
   const thresholds = {};
+  const shortWindow = 20, longWindow = 50, rsiWindow = 14;
+
+  const calculateMA = (data, window) => {
+    const ma = [];
+    for (let i = window - 1; i < data.length; i++) {
+      const slice = data.slice(i - window + 1, i + 1);
+      ma.push(slice.reduce((sum, p) => sum + p.current_price, 0) / window);
+    }
+    return ma;
+  };
+
+  const calculateRSI = (data, window) => {
+    const rsi = [];
+    for (let i = window; i < data.length; i++) {
+      const slice = data.slice(i - window, i);
+      let gains = 0, losses = 0, count = 0;
+      for (let j = 1; j < slice.length; j++) {
+        const delta = slice[j].current_price - slice[j - 1].current_price;
+        if (delta > 0) gains += delta;
+        else losses += -delta;
+        count++;
+      }
+      const avgGain = gains / count, avgLoss = losses / count;
+      const rs = avgGain / (avgLoss || 1);
+      rsi.push(100 - (100 / (1 + rs)));
+    }
+    return rsi;
+  };
 
   for (const [name, days] of Object.entries(timeframes)) {
+    // Resample data for timeframe
+    const tfData = [];
+    for (let i = days - 1; i < historicalPrices.length; i += days) {
+      const slice = historicalPrices.slice(Math.max(0, i - days + 1), i + 1);
+      const avgPrice = slice.reduce((sum, p) => sum + p.current_price, 0) / slice.length;
+      tfData.push({ current_price: avgPrice });
+    }
     const priceChanges = [];
-    for (let i = days; i < historicalPrices.length; i++) {
-      const price = historicalPrices[i].current_price;
-      const prevPrice = historicalPrices[i - days].current_price;
+    for (let i = 1; i < tfData.length; i++) {
+      const price = tfData[i].current_price;
+      const prevPrice = tfData[i - 1].current_price;
       const change = Math.abs((price - prevPrice) / prevPrice);
       priceChanges.push(change);
     }
-    const avgVolatility = priceChanges.length > 0 ? priceChanges.reduce((sum, c) => sum + c, 0) / priceChanges.length : 0.015;
-    const baseThresholds = name === 'daily' ? [0.001, 0.002, 0.005, 0.008] : [0.005, 0.01, 0.02, 0.03];
-    thresholds[name] = baseThresholds.map(t => t * (1 + avgVolatility * 10));
+    const avgVolatility = priceChanges.length ? priceChanges.reduce((sum, c) => sum + c, 0) / priceChanges.length : 0.015;
+    thresholds[name] = {
+      dip: [0.05 * (1 + avgVolatility * 10)], // 5% dip adjusted
+      shortMA: calculateMA(tfData, shortWindow),
+      longMA: calculateMA(tfData, longWindow),
+      rsi: calculateRSI(tfData, rsiWindow)
+    };
   }
   return thresholds;
 };
@@ -32,41 +65,56 @@ export const executeTrade = (currentPrice, prevPrices, thresholds, capital, hold
   const today = new Date().toISOString().split('T')[0];
 
   for (const [timeframe, days] of Object.entries({ daily: 1, weekly: 7, biweekly: 14, monthly: 30, quarterly: 90 })) {
-    if (newLastTradeDates[timeframe] === today) continue; // One trade/day per timeframe
+    if (newLastTradeDates[timeframe] === today) {
+      console.log(`Skipping ${timeframe}: Already traded today`);
+      continue;
+    }
 
     const prevPrice = prevPrices[timeframe] || currentPrice;
     const holding = newHoldings[timeframe] || { units: 0, entryPrice: 0 };
+    const tfThresholds = thresholds[timeframe];
+    const latestShortMA = tfThresholds.shortMA[tfThresholds.shortMA.length - 1] || currentPrice;
+    const latestLongMA = tfThresholds.longMA[tfThresholds.longMA.length - 1] || currentPrice;
+    const latestRSI = tfThresholds.rsi[tfThresholds.rsi.length - 1] || 50;
+
+    console.log(`${timeframe} - Price: ${currentPrice}, Prev: ${prevPrice}, ShortMA: ${latestShortMA}, LongMA: ${latestLongMA}, RSI: ${latestRSI}`);
 
     if (!holding.units) {
-      for (const threshold of thresholds[timeframe].slice().reverse()) {
-        if (currentPrice <= prevPrice * (1 - threshold)) {
-          const units = (capital[timeframe] * 0.25) / currentPrice;
-          actions.push({ timeframe, type: 'BUY', price: currentPrice, units });
-          newCapital[timeframe] -= units * currentPrice;
-          newHoldings[timeframe] = { units, entryPrice: currentPrice };
-          newLastTradeDates[timeframe] = today;
-          break;
-        }
+      const dipThreshold = tfThresholds.dip[0];
+      const isDip = currentPrice <= prevPrice * (1 - dipThreshold);
+      const isTrendBuy = currentPrice < latestShortMA && latestRSI < 30;
+      if (isDip || isTrendBuy) {
+        const units = (capital[timeframe] * 0.25) / currentPrice;
+        actions.push({ timeframe, type: 'BUY', price: currentPrice, units });
+        newCapital[timeframe] -= units * currentPrice;
+        newHoldings[timeframe] = { units, entryPrice: currentPrice };
+        newLastTradeDates[timeframe] = today;
+        console.log(`${timeframe} BUY: ${units} units @ ${currentPrice}`);
+      } else {
+        console.log(`${timeframe}: No buy (Dip: ${isDip}, Trend: ${isTrendBuy})`);
       }
     } else {
       const priceChange = (currentPrice - prevPrice) / prevPrice;
-      if (Math.abs(priceChange) >= 0.40 || currentPrice <= holding.entryPrice * 0.90) {
+      const isSpike = Math.abs(priceChange) >= 0.40;
+      const isStopLoss = currentPrice <= holding.entryPrice * 0.90;
+      const isTrendSell = currentPrice > latestLongMA && latestRSI > 70;
+      if (isSpike || isStopLoss || isTrendSell) {
         const profit = (currentPrice - holding.entryPrice) * holding.units;
         actions.push({ timeframe, type: 'SELL', price: currentPrice, profit });
         newCapital[timeframe] += holding.units * currentPrice;
         newHoldings[timeframe] = { units: 0, entryPrice: 0 };
         newLastTradeDates[timeframe] = today;
-        // Cascade 50% profit to next timeframe
         const nextTimeframe = {
           daily: 'weekly',
           weekly: 'biweekly',
           biweekly: 'monthly',
           monthly: 'quarterly',
-          quarterly: null
+          quarterly: 'daily'
         }[timeframe];
-        if (nextTimeframe) {
-          newCapital[nextTimeframe] += profit * 0.5;
-        }
+        newCapital[nextTimeframe] += profit * 0.5;
+        console.log(`${timeframe} SELL: Profit $${profit}`);
+      } else {
+        console.log(`${timeframe}: No sell (Spike: ${isSpike}, StopLoss: ${isStopLoss}, Trend: ${isTrendSell})`);
       }
     }
   }
@@ -76,46 +124,18 @@ export const executeTrade = (currentPrice, prevPrices, thresholds, capital, hold
 
 export const generateSchedule = (historicalPrices, thresholds) => {
   const schedule = [];
-  const dipCounts = {};
-  for (const timeframe of ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly']) {
-    dipCounts[timeframe] = thresholds[timeframe].reduce((acc, t) => ({ ...acc, [t]: 0 }), {});
-  }
-
-  for (const [timeframe, days] of Object.entries({ daily: 1, weekly: 7, biweekly: 14, monthly: 30, quarterly: 90 })) {
-    for (let i = days; i < historicalPrices.length; i++) {
-      const price = historicalPrices[i].current_price;
-      const prevPrice = historicalPrices[i - days].current_price;
-      const dip = (prevPrice - price) / prevPrice;
-      for (const threshold of thresholds[timeframe]) {
-        if (dip >= threshold) {
-          dipCounts[timeframe][threshold] = (dipCounts[timeframe][threshold] || 0) + 1;
-        }
-      }
-    }
-  }
-
-  const today = new Date();
   for (let day = 1; day <= 7; day++) {
-    const date = new Date(today.getTime() + day * 24 * 60 * 60 * 1000);
+    const date = new Date(Date.now() + day * 24 * 60 * 60 * 1000);
     const dailyEntry = {};
     for (const timeframe of ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly']) {
-      let maxThreshold = 0;
-      for (const threshold of thresholds[timeframe]) {
-        if (dipCounts[timeframe][threshold] / (historicalPrices.length / { daily: 1, weekly: 7, biweekly: 14, monthly: 30, quarterly: 90 }[timeframe]) > 0.05 && threshold > maxThreshold) {
-          maxThreshold = threshold;
-        }
-      }
-      if (maxThreshold) {
-        dailyEntry[timeframe] = {
-          action: 'BUY',
-          threshold: maxThreshold,
-          estimatedPrice: historicalPrices[historicalPrices.length - 1].current_price * (1 - maxThreshold)
-        };
-      }
+      const tfThresholds = thresholds[timeframe];
+      dailyEntry[timeframe] = {
+        action: 'BUY',
+        threshold: tfThresholds.dip[0],
+        estimatedPrice: historicalPrices[historicalPrices.length - 1].current_price * (1 - tfThresholds.dip[0])
+      };
     }
-    if (Object.keys(dailyEntry).length) {
-      schedule.push({ date: date.toISOString().split('T')[0], trades: dailyEntry });
-    }
+    schedule.push({ date: date.toISOString().split('T')[0], trades: dailyEntry });
   }
   return schedule;
 };
