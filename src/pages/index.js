@@ -4,12 +4,30 @@ import { initializeParameters, executeTrade, generateSchedule } from '@/lib/trad
 export default function Dashboard() {
   const [prices, setPrices] = useState([]);
   const [historicalPrices, setHistoricalPrices] = useState([]);
-  const [capital, setCapital] = useState(1000);
+  const [capital, setCapital] = useState({
+    daily: 200,
+    weekly: 200,
+    biweekly: 200,
+    monthly: 200,
+    quarterly: 200
+  });
   const [trades, setTrades] = useState([]);
   const [schedule, setSchedule] = useState([]);
-  const [buyThresholds, setBuyThresholds] = useState([0.001, 0.002, 0.005, 0.008]);
-  const [holding, setHolding] = useState(false);
-  const [entryPrice, setEntryPrice] = useState(0);
+  const [thresholds, setThresholds] = useState({});
+  const [holdings, setHoldings] = useState({
+    daily: { units: 0, entryPrice: 0 },
+    weekly: { units: 0, entryPrice: 0 },
+    biweekly: { units: 0, entryPrice: 0 },
+    monthly: { units: 0, entryPrice: 0 },
+    quarterly: { units: 0, entryPrice: 0 }
+  });
+  const [lastTradeDates, setLastTradeDates] = useState({
+    daily: '',
+    weekly: '',
+    biweekly: '',
+    monthly: '',
+    quarterly: ''
+  });
   const [getBalance, setGetBalance] = useState(0);
 
   const fetchHistoricalPrices = async () => {
@@ -17,9 +35,9 @@ export default function Dashboard() {
     const data = await res.json();
     if (data.success) {
       setHistoricalPrices(data.prices);
-      const adjustedThresholds = initializeParameters(data.prices);
-      setBuyThresholds(adjustedThresholds);
-      const tradeSchedule = generateSchedule(data.prices, adjustedThresholds);
+      const newThresholds = initializeParameters(data.prices);
+      setThresholds(newThresholds);
+      const tradeSchedule = generateSchedule(data.prices, newThresholds);
       setSchedule(tradeSchedule);
       console.log('Trade Schedule:', tradeSchedule);
     }
@@ -32,22 +50,29 @@ export default function Dashboard() {
       setPrices((prev) => {
         const newPrices = [...prev, ...data.prices].slice(-100);
         const btcPrices = newPrices.filter((p) => p.id === 'bitcoin');
-        if (btcPrices.length >= 2) {
+        if (btcPrices.length >= 90) {
           const currentPrice = btcPrices[btcPrices.length - 1].current_price;
-          const prevPrice = btcPrices[btcPrices.length - 2].current_price;
-          const { action, newCapital, newHolding, newEntryPrice } = executeTrade(
+          const prevPrices = {
+            daily: btcPrices[btcPrices.length - 2]?.current_price,
+            weekly: btcPrices[btcPrices.length - 7]?.current_price,
+            biweekly: btcPrices[btcPrices.length - 14]?.current_price,
+            monthly: btcPrices[btcPrices.length - 30]?.current_price,
+            quarterly: btcPrices[btcPrices.length - 90]?.current_price
+          };
+          const { actions, newCapital, newHoldings, newLastTradeDates } = executeTrade(
             currentPrice,
-            prevPrice,
-            buyThresholds,
+            prevPrices,
+            thresholds,
             capital,
-            holding,
-            entryPrice
+            holdings,
+            lastTradeDates
           );
-          if (action) {
-            setTrades((prev) => [...prev, { id: prev.length + 1, ...action }].slice(-50));
+          if (actions.length) {
+            console.log('Trades Executed:', actions);
+            setTrades((prev) => [...prev, ...actions.map((a, i) => ({ id: prev.length + i + 1, ...a }))].slice(-50));
             setCapital(newCapital);
-            setHolding(newHolding);
-            setEntryPrice(newEntryPrice);
+            setHoldings(newHoldings);
+            setLastTradeDates(newLastTradeDates);
           }
         }
         return newPrices;
@@ -98,11 +123,11 @@ export default function Dashboard() {
         </div>
         <div className="bg-gray-100 p-4 rounded col-span-1 md:col-span-2">
           <h2 className="text-xl mb-2">Trades (1,000x ROI Potential)</h2>
-          <p>Capital: ${capital.toFixed(2)}</p>
+          <p>Total Capital: ${(Object.values(capital).reduce((sum, c) => sum + c, 0)).toFixed(2)}</p>
           <ul className="max-h-64 overflow-y-auto">
             {trades.map((trade) => (
               <li key={trade.id} className="mb-1">
-                {trade.type} @ ${trade.price.toFixed(2)}{' '}
+                {trade.timeframe.toUpperCase()} {trade.type} @ ${trade.price.toFixed(2)}{' '}
                 {trade.profit ? `(Profit: $${trade.profit.toFixed(2)})` : `(${trade.units.toFixed(4)} units)`}
               </li>
             ))}
@@ -113,7 +138,9 @@ export default function Dashboard() {
           <ul className="max-h-64 overflow-y-auto">
             {schedule.map((entry, index) => (
               <li key={index} className="mb-1">
-                {entry.date}: {entry.action} at {(entry.threshold * 100).toFixed(1)}% dip (~${entry.estimatedPrice.toFixed(0)})
+                {entry.date}: {Object.entries(entry.trades).map(([tf, t]) => (
+                  `${tf.toUpperCase()}: ${t.action} at ${(t.threshold * 100).toFixed(1)}% dip (~$${t.estimatedPrice.toFixed(0)}) `
+                )).join(', ')}
               </li>
             ))}
           </ul>
@@ -121,4 +148,4 @@ export default function Dashboard() {
       </div>
     </div>
   );
-}
+              }
