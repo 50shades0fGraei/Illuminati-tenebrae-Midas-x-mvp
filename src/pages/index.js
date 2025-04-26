@@ -1,23 +1,55 @@
 import { useState, useEffect } from 'react';
-import { calculateSignals } from '@/lib/trading';
+import { initializeParameters, executeTrade, generateSchedule } from '@/lib/trading';
 
 export default function Dashboard() {
   const [prices, setPrices] = useState([]);
-  const [signals, setSignals] = useState([]);
-  const [getBalance, setGetBalance] = useState(0);
+  const [historicalPrices, setHistoricalPrices] = useState([]);
   const [capital, setCapital] = useState(1000);
   const [trades, setTrades] = useState([]);
+  const [schedule, setSchedule] = useState([]);
+  const [buyThresholds, setBuyThresholds] = useState([0.001, 0.002, 0.005, 0.008]);
+  const [holding, setHolding] = useState(false);
+  const [entryPrice, setEntryPrice] = useState(0);
+  const [getBalance, setGetBalance] = useState(0);
+
+  const fetchHistoricalPrices = async () => {
+    const res = await fetch('/api/coin-prices?historical=true');
+    const data = await res.json();
+    if (data.success) {
+      setHistoricalPrices(data.prices);
+      const adjustedThresholds = initializeParameters(data.prices);
+      setBuyThresholds(adjustedThresholds);
+      const tradeSchedule = generateSchedule(data.prices, adjustedThresholds);
+      setSchedule(tradeSchedule);
+      console.log('Trade Schedule:', tradeSchedule);
+    }
+  };
 
   const fetchPrices = async () => {
     const res = await fetch('/api/coin-prices');
     const data = await res.json();
     if (data.success) {
       setPrices((prev) => {
-        const newPrices = [...prev, ...data.prices].slice(-100); // Keep last 100 prices
+        const newPrices = [...prev, ...data.prices].slice(-100);
         const btcPrices = newPrices.filter((p) => p.id === 'bitcoin');
-        const newSignals = calculateSignals(btcPrices);
-        setSignals(newSignals);
-        updateTrades(newSignals, btcPrices);
+        if (btcPrices.length >= 2) {
+          const currentPrice = btcPrices[btcPrices.length - 1].current_price;
+          const prevPrice = btcPrices[btcPrices.length - 2].current_price;
+          const { action, newCapital, newHolding, newEntryPrice } = executeTrade(
+            currentPrice,
+            prevPrice,
+            buyThresholds,
+            capital,
+            holding,
+            entryPrice
+          );
+          if (action) {
+            setTrades((prev) => [...prev, { id: prev.length + 1, ...action }].slice(-50));
+            setCapital(newCapital);
+            setHolding(newHolding);
+            setEntryPrice(newEntryPrice);
+          }
+        }
         return newPrices;
       });
     }
@@ -33,33 +65,10 @@ export default function Dashboard() {
     if (data.success) setGetBalance(getBalance + data.gets);
   };
 
-  const updateTrades = (signals, prices) => {
-    let currentCapital = capital;
-    const newTrades = [];
-
-    signals.forEach((signal) => {
-      const price = prices.find((p) => p.last_updated === signal.time)?.current_price;
-      if (signal.signal === 1.0) {
-        const units = (currentCapital * 0.25) / price; // 25% of capital
-        newTrades.push({ id: trades.length + newTrades.length + 1, type: 'BUY', price, units });
-        currentCapital -= units * price;
-      } else if (signal.signal === -1.0) {
-        const lastBuy = newTrades.findLast((t) => t.type === 'BUY');
-        if (lastBuy) {
-          const profit = (price - lastBuy.price) * lastBuy.units;
-          newTrades.push({ id: trades.length + newTrades.length + 1, type: 'SELL', price, profit });
-          currentCapital += lastBuy.units * price;
-        }
-      }
-    });
-
-    setTrades((prev) => [...prev, ...newTrades].slice(-50)); // Keep last 50 trades
-    setCapital(currentCapital);
-  };
-
   useEffect(() => {
+    fetchHistoricalPrices();
     fetchPrices();
-    const interval = setInterval(fetchPrices, 60000); // Update every 60s
+    const interval = setInterval(fetchPrices, 60000);
     return () => clearInterval(interval);
   }, []);
 
@@ -95,6 +104,16 @@ export default function Dashboard() {
               <li key={trade.id} className="mb-1">
                 {trade.type} @ ${trade.price.toFixed(2)}{' '}
                 {trade.profit ? `(Profit: $${trade.profit.toFixed(2)})` : `(${trade.units.toFixed(4)} units)`}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="bg-gray-100 p-4 rounded col-span-1 md:col-span-2">
+          <h2 className="text-xl mb-2">Trade Schedule (Next 7 Days)</h2>
+          <ul className="max-h-64 overflow-y-auto">
+            {schedule.map((entry, index) => (
+              <li key={index} className="mb-1">
+                {entry.date}: {entry.action} at {(entry.threshold * 100).toFixed(1)}% dip (~${entry.estimatedPrice.toFixed(0)})
               </li>
             ))}
           </ul>
