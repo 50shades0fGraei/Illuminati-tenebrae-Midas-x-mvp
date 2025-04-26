@@ -5,11 +5,11 @@ export default function Dashboard() {
   const [prices, setPrices] = useState([]);
   const [historicalPrices, setHistoricalPrices] = useState([]);
   const [capital, setCapital] = useState({
-    daily: 200,
-    weekly: 200,
-    biweekly: 200,
-    monthly: 200,
-    quarterly: 200
+    daily: 2000,
+    weekly: 2000,
+    biweekly: 2000,
+    monthly: 2000,
+    quarterly: 2000
   });
   const [trades, setTrades] = useState([]);
   const [schedule, setSchedule] = useState([]);
@@ -102,7 +102,7 @@ export default function Dashboard() {
       <h1 className="text-2xl font-bold mb-4">Midas-x MVP Dashboard</h1>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-gray-100 p-4 rounded">
-          <h2 className="text-xl mb-2">Crypto Prices (CoinGecko)</h2>
+          <h2 className="text-xl mb-2">Crypto Prices (Yahoo Finance)</h2>
           <ul>
             {prices.slice(-2).map((coin) => (
               <li key={coin.id} className="mb-1">
@@ -148,4 +148,4 @@ export default function Dashboard() {
       </div>
     </div>
   );
-              }
+                        }
