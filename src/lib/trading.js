@@ -1,141 +1,108 @@
 // src/lib/trading.js
-export const initializeParameters = (historicalPrices) => {
-  const timeframes = { daily: 1, weekly: 7, biweekly: 14, monthly: 30, quarterly: 90 };
-  const thresholds = {};
-  const shortWindow = 20, longWindow = 50, rsiWindow = 14;
-
-  const calculateMA = (data, window) => {
-    const ma = [];
-    for (let i = window - 1; i < data.length; i++) {
-      const slice = data.slice(i - window + 1, i + 1);
-      ma.push(slice.reduce((sum, p) => sum + p.current_price, 0) / window);
-    }
-    return ma;
-  };
-
-  const calculateRSI = (data, window) => {
-    const rsi = [];
-    for (let i = window; i < data.length; i++) {
-      const slice = data.slice(i - window, i);
-      let gains = 0, losses = 0, count = 0;
-      for (let j = 1; j < slice.length; j++) {
-        const delta = slice[j].current_price - slice[j - 1].current_price;
-        if (delta > 0) gains += delta;
-        else losses += -delta;
-        count++;
-      }
-      const avgGain = gains / count, avgLoss = losses / count;
-      const rs = avgGain / (avgLoss || 1);
-      rsi.push(100 - (100 / (1 + rs)));
-    }
-    return rsi;
-  };
-
-  for (const [name, days] of Object.entries(timeframes)) {
-    // Resample data for timeframe
-    const tfData = [];
-    for (let i = days - 1; i < historicalPrices.length; i += days) {
-      const slice = historicalPrices.slice(Math.max(0, i - days + 1), i + 1);
-      const avgPrice = slice.reduce((sum, p) => sum + p.current_price, 0) / slice.length;
-      tfData.push({ current_price: avgPrice });
-    }
-    const priceChanges = [];
-    for (let i = 1; i < tfData.length; i++) {
-      const price = tfData[i].current_price;
-      const prevPrice = tfData[i - 1].current_price;
-      const change = Math.abs((price - prevPrice) / prevPrice);
-      priceChanges.push(change);
-    }
-    const avgVolatility = priceChanges.length ? priceChanges.reduce((sum, c) => sum + c, 0) / priceChanges.length : 0.015;
-    thresholds[name] = {
-      dip: [0.05 * (1 + avgVolatility * 10)], // 5% dip adjusted
-      shortMA: calculateMA(tfData, shortWindow),
-      longMA: calculateMA(tfData, longWindow),
-      rsi: calculateRSI(tfData, rsiWindow)
+export const executeTrade = (currentPrices, prevPrices, thresholds, capital, holdings, lastTradeDates, getBalance) => {
+    const actions = [];
+    const newCapital = { ...capital };
+    const newHoldings = { ...holdings };
+    const newLastTradeDates = { ...lastTradeDates };
+    const today = new Date().toISOString().split('T')[0];
+    const markets = { small: ['SHIB-USD', 'DOGS-USD'], large: ['BTC-USD', 'ETH-USD'] };
+    const REALLOC_ALLOCATION = 0.3, REALLOC_GAIN = 0.1;
+    const cascadeRatios = {
+        small: { daily: { true: 0.8, false: 0.7 }, weekly: { true: 0.6, false: 0.5 } },
+        large: { daily: { true: 0.7, false: 0.6 }, weekly: { true: 0.5, false: 0.4 } }
     };
-  }
-  return thresholds;
-};
+    const trailingStop = 0.05, stopLoss = 0.10;
+    const layerBuyThresholds = {
+        main: [0.008, 0.004, 0.002, 0.001],
+        nano: [0.0008, 0.0004, 0.0002, 0.0001],
+        pico: [0.000015, 0.000025, 0.00004, 0.00008]
+    };
+    const layerSellTriggers = {
+        main: [0.4, 0.5, 0.6, 0.8],
+        nano: [0.5, 0.6, 0.7, 0.9],
+        pico: [0.6, 0.7, 0.8, 1.0]
+    };
+    const incrementalBuyThresholds = [0.02, 0.04, 0.06]; // 2%, 4%, 6% dips
+    const sellChangeTrigger = 0.07; // 7% sell trigger
 
-export const executeTrade = (currentPrice, prevPrices, thresholds, capital, holdings, lastTradeDates) => {
-  const actions = [];
-  const newCapital = { ...capital };
-  const newHoldings = { ...holdings };
-  const newLastTradeDates = { ...lastTradeDates };
-  const today = new Date().toISOString().split('T')[0];
+    const detectTopRiser = () => {
+        const changes = {};
+        for (const ticker of [...markets.small, ...markets.large]) {
+            const price = currentPrices[ticker]?.current_price || prevPrices[ticker];
+            const prevPrice = prevPrices[ticker] || price;
+            changes[ticker] = (price - prevPrice) / prevPrice;
+        }
+        const topRiser = Object.keys(changes).reduce((a, b) => changes[a] > changes[b] ? a : b, 'SHIB-USD');
+        return { topRiser, isValid: changes[topRiser] > 0 };
+    };
 
-  for (const [timeframe, days] of Object.entries({ daily: 1, weekly: 7, biweekly: 14, monthly: 30, quarterly: 90 })) {
-    if (newLastTradeDates[timeframe] === today) {
-      console.log(`Skipping ${timeframe}: Already traded today`);
-      continue;
+    const { topRiser, isValid: isTopRiserValid } = detectTopRiser();
+
+    for (const marketType of ['small', 'large']) {
+        for (const ticker of markets[marketType]) {
+            for (const timeframe of ['daily', 'weekly']) {
+                const lastTradeDate = newLastTradeDates[`${ticker}_${timeframe}`] || '1970-01-01';
+                const days = timeframe === 'daily' ? 1 : 7;
+                const daysSinceLastTrade = (new Date(today) - new Date(lastTradeDate)) / (1000 * 60 * 60 * 24);
+                if (daysSinceLastTrade < days) continue;
+
+                const currentPrice = currentPrices[ticker]?.current_price || prevPrices[ticker];
+                const prevPrice = prevPrices[`${ticker}_${timeframe}`] || currentPrice;
+                const holding = newHoldings[`${ticker}_${timeframe}`] || { units: 0, entryPrice: 0, realloc: false };
+                const tfThresholds = thresholds[`${ticker}_${timeframe}`];
+                const latestMA20 = tfThresholds.longMA[tfThresholds.longMA.length - 1] || currentPrice;
+                const latestRSI = tfThresholds.rsi[tfThresholds.rsi.length - 1] || 50;
+                const highVol = tfThresholds.volatility[tfThresholds.volatility.length - 1] > 0.15;
+
+                for (const layer of ['main', 'nano', 'pico']) {
+                    const buyThreshold = layerBuyThresholds[layer][0];
+                    const sellTrigger = layerSellTriggers[layer][0];
+                    const baseTradeSize = (marketType === 'small' ? (highVol ? 5 : 3) : (highVol ? 20 : 15)) / 3;
+
+                    if (!holding.units) {
+                        let signal = 0;
+                        if (latestRSI < 25 && currentPrice <= latestMA20 * (1 - buyThreshold)) {
+                            signal = 1;
+                        }
+                        for (let j = 0; j < incrementalBuyThresholds.length; j++) {
+                            if (latestRSI < 25 && currentPrice <= latestMA20 * (1 - incrementalBuyThresholds[j])) {
+                                signal = j + 2;
+                            }
+                        }
+                        const priceChange = (currentPrice - prevPrice) / prevPrice;
+                        const isRealloc = priceChange < -0.01 && isTopRiserValid && topRiser !== ticker && !holding.realloc;
+                        let tradeSize = baseTradeSize * (signal >= 6 ? 2 : 1);
+                        if (isRealloc) tradeSize *= REALLOC_ALLOCATION;
+
+                        if (signal >= 1 || isRealloc) {
+                            const units = tradeSize / currentPrice;
+                            actions.push({ ticker, timeframe, layer, type: 'BUY', price: currentPrice, units, realloc: isRealloc });
+                            newCapital[`${ticker}_${timeframe}`] -= units * currentPrice;
+                            newHoldings[`${ticker}_${timeframe}`] = { units, entryPrice: currentPrice, realloc: isRealloc };
+                            newLastTradeDates[`${ticker}_${timeframe}`] = today;
+                            console.log(`${ticker} ${timeframe} ${layer} BUY: ${units} units @ ${currentPrice} (Signal: ${signal}, Realloc: ${isRealloc})`);
+                        }
+                    } else {
+                        const isSpike = currentPrice >= holding.entryPrice * (1 + sellTrigger);
+                        const isChangeSell = currentPrice >= prevPrice * (1 + sellChangeTrigger);
+                        const isTrailingStop = currentPrice <= prevPrice * (1 - trailingStop);
+                        const isStopLoss = currentPrice <= holding.entryPrice * (1 - stopLoss);
+                        const isReallocSell = holding.realloc && currentPrice >= holding.entryPrice * (1 + REALLOC_GAIN);
+                        if (isSpike || isChangeSell || isTrailingStop || isStopLoss || isReallocSell) {
+                            const profit = (currentPrice - holding.entryPrice) * holding.units;
+                            const cascadeProfit = profit * cascadeRatios[marketType][timeframe][highVol];
+                            actions.push({ ticker, timeframe, layer, type: 'SELL', price: currentPrice, profit: cascadeProfit, realloc: holding.realloc });
+                            newCapital[`${ticker}_${timeframe}`] += holding.units * currentPrice;
+                            newHoldings[`${ticker}_${timeframe}`] = { units: 0, entryPrice: 0, realloc: false };
+                            newLastTradeDates[`${ticker}_${timeframe}`] = today;
+                            newCapital[`${topRiser}_${timeframe}`] += cascadeProfit * 0.3;
+                            console.log(`${ticker} ${timeframe} ${layer} SELL: Profit $${cascadeProfit} (Spike: ${isSpike}, Change: ${isChangeSell}, TrailingStop: ${isTrailingStop}, StopLoss: ${isStopLoss}, Realloc: ${isReallocSell})`);
+                        }
+                    }
+                }
+            }
+        }
     }
-
-    const prevPrice = prevPrices[timeframe] || currentPrice;
-    const holding = newHoldings[timeframe] || { units: 0, entryPrice: 0 };
-    const tfThresholds = thresholds[timeframe];
-    const latestShortMA = tfThresholds.shortMA[tfThresholds.shortMA.length - 1] || currentPrice;
-    const latestLongMA = tfThresholds.longMA[tfThresholds.longMA.length - 1] || currentPrice;
-    const latestRSI = tfThresholds.rsi[tfThresholds.rsi.length - 1] || 50;
-
-    console.log(`${timeframe} - Price: ${currentPrice}, Prev: ${prevPrice}, ShortMA: ${latestShortMA}, LongMA: ${latestLongMA}, RSI: ${latestRSI}`);
-
-    if (!holding.units) {
-      const dipThreshold = tfThresholds.dip[0];
-      const isDip = currentPrice <= prevPrice * (1 - dipThreshold);
-      const isTrendBuy = currentPrice < latestShortMA && latestRSI < 30;
-      if (isDip || isTrendBuy) {
-        const units = (capital[timeframe] * 0.25) / currentPrice;
-        actions.push({ timeframe, type: 'BUY', price: currentPrice, units });
-        newCapital[timeframe] -= units * currentPrice;
-        newHoldings[timeframe] = { units, entryPrice: currentPrice };
-        newLastTradeDates[timeframe] = today;
-        console.log(`${timeframe} BUY: ${units} units @ ${currentPrice}`);
-      } else {
-        console.log(`${timeframe}: No buy (Dip: ${isDip}, Trend: ${isTrendBuy})`);
-      }
-    } else {
-      const priceChange = (currentPrice - prevPrice) / prevPrice;
-      const isSpike = Math.abs(priceChange) >= 0.40;
-      const isStopLoss = currentPrice <= holding.entryPrice * 0.90;
-      const isTrendSell = currentPrice > latestLongMA && latestRSI > 70;
-      if (isSpike || isStopLoss || isTrendSell) {
-        const profit = (currentPrice - holding.entryPrice) * holding.units;
-        actions.push({ timeframe, type: 'SELL', price: currentPrice, profit });
-        newCapital[timeframe] += holding.units * currentPrice;
-        newHoldings[timeframe] = { units: 0, entryPrice: 0 };
-        newLastTradeDates[timeframe] = today;
-        const nextTimeframe = {
-          daily: 'weekly',
-          weekly: 'biweekly',
-          biweekly: 'monthly',
-          monthly: 'quarterly',
-          quarterly: 'daily'
-        }[timeframe];
-        newCapital[nextTimeframe] += profit * 0.5;
-        console.log(`${timeframe} SELL: Profit $${profit}`);
-      } else {
-        console.log(`${timeframe}: No sell (Spike: ${isSpike}, StopLoss: ${isStopLoss}, Trend: ${isTrendSell})`);
-      }
-    }
-  }
-
-  return { actions, newCapital, newHoldings, newLastTradeDates };
-};
-
-export const generateSchedule = (historicalPrices, thresholds) => {
-  const schedule = [];
-  for (let day = 1; day <= 7; day++) {
-    const date = new Date(Date.now() + day * 24 * 60 * 60 * 1000);
-    const dailyEntry = {};
-    for (const timeframe of ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly']) {
-      const tfThresholds = thresholds[timeframe];
-      dailyEntry[timeframe] = {
-        action: 'BUY',
-        threshold: tfThresholds.dip[0],
-        estimatedPrice: historicalPrices[historicalPrices.length - 1].current_price * (1 - tfThresholds.dip[0])
-      };
-    }
-    schedule.push({ date: date.toISOString().split('T')[0], trades: dailyEntry });
-  }
-  return schedule;
+    const getsMinted = actions.reduce((sum, a) => sum + (a.type === 'SELL' ? Math.floor(a.price * a.units / 1000) : 0), 0);
+    return { actions, newCapital, newHoldings, newLastTradeDates, getsUsed: 0, getsMinted };
 };
