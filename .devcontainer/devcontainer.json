@@ -1,0 +1,35 @@
+{
+  "name": "Illuminati Tenebrae MVP",
+  "image": "mcr.microsoft.com/vscode/devcontainers/javascript-node:20",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-typescript-next"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode"
+      }
+    }
+  },
+  "postCreateCommand": "npm install",
+  "portsAttributes": {
+    "3000": {
+      "label": "Application",
+      "onAutoForward": "notify"
+    }
+  },
+  "forwardPorts": [3000],
+  "secrets": {
+    "API_KEY": {
+      "description": "API key for Illuminati Tenebrae services",
+      "default": ""
+    }
+  }
+}
